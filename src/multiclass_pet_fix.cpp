@@ -71,7 +71,8 @@ public:
         {
             Guardian* guardian = (Guardian*)tempSummon;
             uint32 creatorSpellId = guardian->GetUInt32Value(UNIT_CREATED_BY_SPELL);
-            if (creatorSpellId == 688 || creatorSpellId == 697 || creatorSpellId == 712 || creatorSpellId == 691 || creatorSpellId == 30146 || creatorSpellId == 31687 || creatorSpellId == 52150)
+            if (creatorSpellId == 688 || creatorSpellId == 697 || creatorSpellId == 712 || creatorSpellId == 691 || creatorSpellId == 30146 || 
+                creatorSpellId == 70907 || creatorSpellId == 70908 || creatorSpellId == 46584 || creatorSpellId == 52150)
             {
                 // If it is summoned as a minion/guardian (not the player's primary pet)
                 if (player->GetPetGUID() != guardian->GetGUID())
@@ -239,6 +240,8 @@ void AddMulticlassPetFixScripts()
                           "(712, 'spell_summon_pet_override'), "     // Summon Succubus
                           "(691, 'spell_summon_pet_override'), "     // Summon Felhunter
                           "(30146, 'spell_summon_pet_override'), "   // Summon Felguard
-                          "(31687, 'spell_summon_pet_override'), "   // Summon Water Elemental
-                          "(52150, 'spell_summon_pet_override')");   // Summon Ghoul (DK pet spell)
+                          "(70907, 'spell_summon_pet_override'), "   // Summon Water Elemental (Temp)
+                          "(70908, 'spell_summon_pet_override'), "   // Summon Water Elemental (Perm)
+                          "(46584, 'spell_summon_pet_override'), "   // Raise Dead (Temp Ghoul)
+                          "(52150, 'spell_summon_pet_override')");   // Raise Dead (Perm Ghoul)
 }
