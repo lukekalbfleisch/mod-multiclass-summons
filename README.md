@@ -67,3 +67,9 @@ If installed on a standard, single-class WotLK server, the gameplay changes are 
 * **Warlocks**: A single-class Warlock will be able to summon all of their demons (Imp, Voidwalker, Succubus, Felhunter, Felguard) at the same time. The first demon summoned will act as the primary pet (displaying the pet action bar and control frame), while any subsequent demons will spawn as controllable minions that follow and auto-cast their main abilities in combat.
 * **Other Classes**: All other single-class players (Mages, Hunters, Death Knights) are **unaffected**. Their pet summoning rules, limits, and behaviors remain 100% standard and Blizzlike.
 
+---
+
+## Future Planned Features
+* **Minion Mount/Dismount Persistence**: Automatically save active secondary minions when mounting, and automatically restore/respawn them upon dismounting so players don't have to manually recast them.
+
+

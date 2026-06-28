@@ -79,6 +79,9 @@ public:
                     // Make it controllable so it uses PetAI and auto-casts spells
                     guardian->AddUnitTypeMask(UNIT_MASK_CONTROLLABLE_GUARDIAN);
                     guardian->InitCharmInfo();
+                    
+                    // Force the creature to re-initialize its AI so it picks up PetAI instead of NullAI
+                    guardian->AIM_Initialize();
                 }
             }
         }
@@ -172,6 +175,10 @@ class SpellSummonPetOverrideScript : public SpellScript
         OnEffectHit += SpellEffectFn(SpellSummonPetOverrideScript::HandleSummon, EFFECT_0, SPELL_EFFECT_SUMMON_PET);
         OnEffectHit += SpellEffectFn(SpellSummonPetOverrideScript::HandleSummon, EFFECT_1, SPELL_EFFECT_SUMMON_PET);
         OnEffectHit += SpellEffectFn(SpellSummonPetOverrideScript::HandleSummon, EFFECT_2, SPELL_EFFECT_SUMMON_PET);
+
+        OnEffectHit += SpellEffectFn(SpellSummonPetOverrideScript::HandleSummon, EFFECT_0, SPELL_EFFECT_SUMMON);
+        OnEffectHit += SpellEffectFn(SpellSummonPetOverrideScript::HandleSummon, EFFECT_1, SPELL_EFFECT_SUMMON);
+        OnEffectHit += SpellEffectFn(SpellSummonPetOverrideScript::HandleSummon, EFFECT_2, SPELL_EFFECT_SUMMON);
     }
 };
 
