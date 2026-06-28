@@ -94,32 +94,49 @@ public:
             // For pet permanent checks and spell handling, check if the player has the corresponding class pet summon spells.
             if (playerClass == CLASS_WARLOCK)
             {
-                // Imp (688), Voidwalker (697), Succubus (712), Felhunter (691), Felguard (30146)
-                if (player->HasSpell(688) || player->HasSpell(697) || player->HasSpell(712) || player->HasSpell(691) || player->HasSpell(30146))
+                bool hasImp = player->HasSpell(688);
+                bool hasVoid = player->HasSpell(697);
+                bool hasSucc = player->HasSpell(712);
+                bool hasFel = player->HasSpell(691);
+                bool hasGuard = player->HasSpell(30146);
+
+                LOG_INFO("module.multiclass_pet_fix", "OnPlayerIsClass Check: Player {} (Class {}) checked for WARLOCK. Spells: Imp={}, Void={}, Succ={}, Fel={}, Guard={}",
+                    player->GetName(), (uint32)player->getClass(), hasImp, hasVoid, hasSucc, hasFel, hasGuard);
+
+                if (hasImp || hasVoid || hasSucc || hasFel || hasGuard)
                 {
                     return true;
                 }
             }
             else if (playerClass == CLASS_MAGE)
             {
-                // Summon Water Elemental (31687)
-                if (player->HasSpell(31687))
+                bool hasWater = player->HasSpell(31687);
+                LOG_INFO("module.multiclass_pet_fix", "OnPlayerIsClass Check: Player {} (Class {}) checked for MAGE. Spell: WaterElem={}",
+                    player->GetName(), (uint32)player->getClass(), hasWater);
+
+                if (hasWater)
                 {
                     return true;
                 }
             }
             else if (playerClass == CLASS_DEATH_KNIGHT)
             {
-                // Raise Dead (46584)
-                if (player->HasSpell(46584))
+                bool hasGhoul = player->HasSpell(46584);
+                LOG_INFO("module.multiclass_pet_fix", "OnPlayerIsClass Check: Player {} (Class {}) checked for DEATH_KNIGHT. Spell: RaiseDead={}",
+                    player->GetName(), (uint32)player->getClass(), hasGhoul);
+
+                if (hasGhoul)
                 {
                     return true;
                 }
             }
             else if (playerClass == CLASS_HUNTER)
             {
-                // Call Pet (883)
-                if (player->HasSpell(883))
+                bool hasCall = player->HasSpell(883);
+                LOG_INFO("module.multiclass_pet_fix", "OnPlayerIsClass Check: Player {} (Class {}) checked for HUNTER. Spell: CallPet={}",
+                    player->GetName(), (uint32)player->getClass(), hasCall);
+
+                if (hasCall)
                 {
                     return true;
                 }
@@ -198,9 +215,12 @@ void AddMulticlassPetFixScripts()
     new MulticlassPetFixPlayerScript();
     new SpellSummonPetOverrideLoader();
 
-    // Dynamically register the spell script to the DB during server startup to make it zero-config
+    // Clean up any remnants in the wrong table (spell_scripts) from the previous typo
     WorldDatabase.Execute("DELETE FROM spell_scripts WHERE ScriptName = 'spell_summon_pet_override'");
-    WorldDatabase.Execute("INSERT INTO spell_scripts (spell_id, ScriptName) VALUES "
+
+    // Dynamically register the spell script to the DB during server startup to make it zero-config
+    WorldDatabase.Execute("DELETE FROM spell_script_names WHERE ScriptName = 'spell_summon_pet_override'");
+    WorldDatabase.Execute("INSERT INTO spell_script_names (spell_id, ScriptName) VALUES "
                           "(688, 'spell_summon_pet_override'), "     // Summon Imp
                           "(697, 'spell_summon_pet_override'), "     // Summon Voidwalker
                           "(712, 'spell_summon_pet_override'), "     // Summon Succubus
