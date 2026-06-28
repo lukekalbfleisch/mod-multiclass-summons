@@ -32,7 +32,7 @@ make -j$(nproc) && make install
 ./acore.sh compiler build
 ```
 
-Restart your `ac-worldserver` container/application. The module will dynamically register its spell overrides into the `spell_scripts` database table automatically during startup.
+Restart your `ac-worldserver` container/application. The module ships its spell-override registration in `data/sql/db-world/base/multiclass_summons.sql`, which AzerothCore's DBUpdater applies automatically during database loading at startup (before the spell system reads `spell_script_names`).
 
 ---
 

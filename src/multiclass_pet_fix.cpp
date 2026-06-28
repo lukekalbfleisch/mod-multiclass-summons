@@ -9,6 +9,31 @@
 #include "Map.h"
 #include "TemporarySummon.h"
 
+namespace
+{
+    // Summon spells this module intercepts. A second cast while a pet is already
+    // active is diverted to a controllable side guardian instead of replacing the
+    // primary pet. Keep this list in sync with data/sql/db-world/base/multiclass_summons.sql.
+    bool IsMulticlassSummonSpell(uint32 spellId)
+    {
+        switch (spellId)
+        {
+            case 688:   // Summon Imp
+            case 697:   // Summon Voidwalker
+            case 712:   // Summon Succubus
+            case 691:   // Summon Felhunter
+            case 30146: // Summon Felguard
+            case 70907: // Summon Water Elemental (Temp)
+            case 70908: // Summon Water Elemental (Perm)
+            case 46584: // Raise Dead (Temp Ghoul)
+            case 52150: // Raise Dead (Perm Ghoul)
+                return true;
+            default:
+                return false;
+        }
+    }
+}
+
 class MulticlassPetFixPlayerScript : public PlayerScript
 {
 public:
@@ -71,13 +96,17 @@ public:
         {
             Guardian* guardian = (Guardian*)tempSummon;
             uint32 creatorSpellId = guardian->GetUInt32Value(UNIT_CREATED_BY_SPELL);
-            if (creatorSpellId == 688 || creatorSpellId == 697 || creatorSpellId == 712 || creatorSpellId == 691 || creatorSpellId == 30146 || 
-                creatorSpellId == 70907 || creatorSpellId == 70908 || creatorSpellId == 46584 || creatorSpellId == 52150)
+            if (IsMulticlassSummonSpell(creatorSpellId))
             {
                 // If it is summoned as a minion/guardian (not the player's primary pet)
                 if (player->GetPetGUID() != guardian->GetGUID())
                 {
-                    // Make it controllable so it uses PetAI and auto-casts spells
+                    // Make it controllable so it uses PetAI and auto-casts spells.
+                    // NOTE: Do NOT call AIM_Initialize() here. This hook fires during
+                    // TempSummon::InitStats(), before the creature is added to the world.
+                    // AddToWorld() will call AIM_Initialize() itself, and at that point
+                    // UNIT_MASK_CONTROLLABLE_GUARDIAN ensures it picks up PetAI correctly.
+                    // Calling it here causes a double-init that can reset AI to NullCreatureAI.
                     guardian->AddUnitTypeMask(UNIT_MASK_CONTROLLABLE_GUARDIAN);
                     guardian->InitCharmInfo();
                 }
@@ -154,48 +183,58 @@ class SpellSummonPetOverrideScript : public SpellScript
         if (!owner)
             return;
 
-        // If the player already has a pet active
-        if (owner->GetPet())
+        // Only divert to a side guardian when the player already has a primary pet.
+        // GetPetGUID() (the SUMMON_SLOT_PET slot) covers both real Pet objects and
+        // slot-claiming guardian pets, whereas GetPet() only matches true Pets and
+        // would miss guardian-style primaries (e.g. permanent Water Elemental / Ghoul).
+        if (!owner->GetPetGUID())
+            return;
+
+        // Prevent the default summon effect, which would dismiss the active pet.
+        PreventHitDefaultEffect(effIndex);
+
+        uint32 petEntry = GetSpellInfo()->Effects[effIndex].MiscValue;
+        if (!petEntry)
+            return;
+
+        // Summon a controllable guardian that does NOT claim the pet slot:
+        //   - Category ALLY keeps Minion::IsGuardianPet() false, so Unit::SetMinion
+        //     never displaces (dismisses) the existing primary pet.
+        //   - Type GUARDIAN makes Map::SummonCreature instantiate a Guardian (an
+        //     ALLY category resolves the unit mask from Type; PET would instead fall
+        //     through to a plain, AI-less TempSummon).
+        //   - Slot 0 avoids evicting other active side guardians via m_SummonSlot.
+        // These are set explicitly rather than cloned from SummonProperties entry 67
+        // so behaviour does not depend on that entry's (DBC-defined) Type/Slot values.
+        // MulticlassPetFixPlayerScript::OnPlayerBeforeTempSummonInitStats then flags
+        // the guardian controllable during InitStats, so AIM_Initialize picks PetAI
+        // (auto-follow + autocast) for it.
+        static SummonPropertiesEntry const guardianProperties = []
         {
-            // Prevent the default EffectSummonPet from running
-            PreventHitDefaultEffect(effIndex);
+            SummonPropertiesEntry props{};
+            props.Id = 67;
+            props.Category = SUMMON_CATEGORY_ALLY;
+            props.Faction = 0;
+            props.Type = SUMMON_TYPE_GUARDIAN;
+            props.Slot = 0;
+            props.Flags = 0;
+            return props;
+        }();
 
-            // Summon it as a Guardian/Minion instead!
-            uint32 petEntry = GetSpellInfo()->Effects[effIndex].MiscValue;
-            if (!petEntry)
-                return;
+        float x, y, z;
+        owner->GetClosePoint(x, y, z, owner->GetObjectSize());
 
-            float x, y, z;
-            owner->GetClosePoint(x, y, z, owner->GetObjectSize());
+        int32 duration = GetSpellInfo()->GetDuration();
+        if (Player* modOwner = owner->GetSpellModOwner())
+            modOwner->ApplySpellMod(GetSpellInfo()->Id, SPELLMOD_DURATION, duration);
 
-            // Create a custom SummonPropertiesEntry so it doesn't dismiss the active pet
-            static SummonPropertiesEntry customProperties;
-            static bool customPropertiesInit = false;
-            if (!customPropertiesInit)
-            {
-                if (SummonPropertiesEntry const* defaultProp = sSummonPropertiesStore.LookupEntry(67))
-                {
-                    customProperties = *defaultProp;
-                    customProperties.Category = SUMMON_CATEGORY_ALLY; // Change to ALLY so it doesn't count as primary pet
-                    customPropertiesInit = true;
-                }
-            }
+        TempSummon* summon = owner->GetMap()->SummonCreature(petEntry, Position(x, y, z, owner->GetOrientation()), &guardianProperties, duration, owner, GetSpellInfo()->Id);
+        if (!summon)
+            return;
 
-            SummonPropertiesEntry const* properties = customPropertiesInit ? &customProperties : sSummonPropertiesStore.LookupEntry(67);
-
-            int32 duration = GetSpellInfo()->GetDuration();
-            if (Player* modOwner = owner->GetSpellModOwner())
-                modOwner->ApplySpellMod(GetSpellInfo()->Id, SPELLMOD_DURATION, duration);
-
-            TempSummon* summon = owner->GetMap()->SummonCreature(petEntry, Position(x, y, z, owner->GetOrientation()), properties, duration, owner, GetSpellInfo()->Id);
-            if (!summon)
-                return;
-
-            // Generate name
-            std::string newName = sObjectMgr->GeneratePetName(petEntry);
-            if (!newName.empty())
-                summon->SetName(newName);
-        }
+        std::string newName = sObjectMgr->GeneratePetName(petEntry);
+        if (!newName.empty())
+            summon->SetName(newName);
     }
 
     void Register() override
@@ -226,19 +265,9 @@ void AddMulticlassPetFixScripts()
     new MulticlassPetFixPlayerScript();
     new SpellSummonPetOverrideLoader();
 
-    // Clean up any remnants in the wrong table (spell_scripts) from the previous typo
-    WorldDatabase.Execute("DELETE FROM spell_scripts WHERE ScriptName = 'spell_summon_pet_override'");
-
-    // Dynamically register the spell script to the DB during server startup to make it zero-config
-    WorldDatabase.Execute("DELETE FROM spell_script_names WHERE ScriptName = 'spell_summon_pet_override'");
-    WorldDatabase.Execute("INSERT INTO spell_script_names (spell_id, ScriptName) VALUES "
-                          "(688, 'spell_summon_pet_override'), "     // Summon Imp
-                          "(697, 'spell_summon_pet_override'), "     // Summon Voidwalker
-                          "(712, 'spell_summon_pet_override'), "     // Summon Succubus
-                          "(691, 'spell_summon_pet_override'), "     // Summon Felhunter
-                          "(30146, 'spell_summon_pet_override'), "   // Summon Felguard
-                          "(70907, 'spell_summon_pet_override'), "   // Summon Water Elemental (Temp)
-                          "(70908, 'spell_summon_pet_override'), "   // Summon Water Elemental (Perm)
-                          "(46584, 'spell_summon_pet_override'), "   // Raise Dead (Temp Ghoul)
-                          "(52150, 'spell_summon_pet_override')");   // Raise Dead (Perm Ghoul)
+    // NOTE: spell_script_names registration is handled by
+    // data/sql/db-world/base/multiclass_summons.sql, which the DBUpdater auto-applies
+    // during database loading at startup, BEFORE LoadSpellScriptNames().
+    // DO NOT use runtime WorldDatabase.Execute() here - it runs AFTER LoadSpellScriptNames()
+    // has already cached the table, so runtime INSERTs are only seen on the next restart.
 }
