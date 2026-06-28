@@ -109,68 +109,25 @@ public:
                     // Calling it here causes a double-init that can reset AI to NullCreatureAI.
                     guardian->AddUnitTypeMask(UNIT_MASK_CONTROLLABLE_GUARDIAN);
                     guardian->InitCharmInfo();
+
+                    // Diagnostic: confirms a secondary summon was upgraded to a
+                    // controllable guardian. Demote to LOG_DEBUG once verified.
+                    LOG_INFO("module.multiclass_pet_fix", "TempSummonInitStats: flagged controllable guardian entry {} (spell {}) for {}",
+                        guardian->GetEntry(), creatorSpellId, player->GetName());
                 }
             }
         }
     }
 
-    Optional<bool> OnPlayerIsClass(Player const* player, Classes playerClass, ClassContext context) override
-    {
-        if (context == CLASS_CONTEXT_PET)
-        {
-            // For pet permanent checks and spell handling, check if the player has the corresponding class pet summon spells.
-            if (playerClass == CLASS_WARLOCK)
-            {
-                bool hasImp = player->HasSpell(688);
-                bool hasVoid = player->HasSpell(697);
-                bool hasSucc = player->HasSpell(712);
-                bool hasFel = player->HasSpell(691);
-                bool hasGuard = player->HasSpell(30146);
-
-                LOG_INFO("module.multiclass_pet_fix", "OnPlayerIsClass Check: Player {} (Class {}) checked for WARLOCK. Spells: Imp={}, Void={}, Succ={}, Fel={}, Guard={}",
-                    player->GetName(), (uint32)player->getClass(), hasImp, hasVoid, hasSucc, hasFel, hasGuard);
-
-                if (hasImp || hasVoid || hasSucc || hasFel || hasGuard)
-                {
-                    return true;
-                }
-            }
-            else if (playerClass == CLASS_MAGE)
-            {
-                bool hasWater = player->HasSpell(31687);
-                LOG_INFO("module.multiclass_pet_fix", "OnPlayerIsClass Check: Player {} (Class {}) checked for MAGE. Spell: WaterElem={}",
-                    player->GetName(), (uint32)player->getClass(), hasWater);
-
-                if (hasWater)
-                {
-                    return true;
-                }
-            }
-            else if (playerClass == CLASS_DEATH_KNIGHT)
-            {
-                bool hasGhoul = player->HasSpell(46584);
-                LOG_INFO("module.multiclass_pet_fix", "OnPlayerIsClass Check: Player {} (Class {}) checked for DEATH_KNIGHT. Spell: RaiseDead={}",
-                    player->GetName(), (uint32)player->getClass(), hasGhoul);
-
-                if (hasGhoul)
-                {
-                    return true;
-                }
-            }
-            else if (playerClass == CLASS_HUNTER)
-            {
-                bool hasCall = player->HasSpell(883);
-                LOG_INFO("module.multiclass_pet_fix", "OnPlayerIsClass Check: Player {} (Class {}) checked for HUNTER. Spell: CallPet={}",
-                    player->GetName(), (uint32)player->getClass(), hasCall);
-
-                if (hasCall)
-                {
-                    return true;
-                }
-            }
-        }
-        return std::nullopt;
-    }
+    // NOTE: This module intentionally does NOT override OnPlayerIsClass.
+    //
+    // On Dad's MMO Lab / Unbound the dedicated multiclass module owns class identity
+    // (it implements OnPlayerIsClass for every ClassContext). A previous version here
+    // returned "true" for CLASS_CONTEXT_PET whenever player->HasSpell(<summon spell>),
+    // but multiclass servers grant every class's spells into every spellbook, so that
+    // check was true for ALL characters - which made the core treat everyone as a
+    // warlock in pet context and let any character summon/control demons. Leave class
+    // identity to the multiclass module; this module only handles the summon mechanics.
 };
 
 class SpellSummonPetOverrideScript : public SpellScript
@@ -183,11 +140,18 @@ class SpellSummonPetOverrideScript : public SpellScript
         if (!owner)
             return;
 
+        // Diagnostic: confirm the override fires and on which spell/effect. Grep the
+        // worldserver log for "module.multiclass_pet_fix". Demote to LOG_DEBUG once the
+        // secondary-summon behaviour is verified for every pet type.
+        ObjectGuid const petGuid = owner->GetPetGUID();
+        LOG_INFO("module.multiclass_pet_fix", "HandleSummon fired: spell {} effIdx {} caster {} GetPetGUID {}",
+            GetSpellInfo()->Id, uint32(effIndex), owner->GetName(), petGuid.ToString());
+
         // Only divert to a side guardian when the player already has a primary pet.
         // GetPetGUID() (the SUMMON_SLOT_PET slot) covers both real Pet objects and
         // slot-claiming guardian pets, whereas GetPet() only matches true Pets and
         // would miss guardian-style primaries (e.g. permanent Water Elemental / Ghoul).
-        if (!owner->GetPetGUID())
+        if (!petGuid)
             return;
 
         // Prevent the default summon effect, which would dismiss the active pet.
@@ -230,7 +194,13 @@ class SpellSummonPetOverrideScript : public SpellScript
 
         TempSummon* summon = owner->GetMap()->SummonCreature(petEntry, Position(x, y, z, owner->GetOrientation()), &guardianProperties, duration, owner, GetSpellInfo()->Id);
         if (!summon)
+        {
+            LOG_INFO("module.multiclass_pet_fix", "HandleSummon: SummonCreature returned null for entry {} (spell {})", petEntry, GetSpellInfo()->Id);
             return;
+        }
+
+        LOG_INFO("module.multiclass_pet_fix", "HandleSummon: diverted spell {} entry {} to side guardian {} (mask guardian={})",
+            GetSpellInfo()->Id, petEntry, summon->GetGUID().ToString(), summon->IsGuardian());
 
         std::string newName = sObjectMgr->GeneratePetName(petEntry);
         if (!newName.empty())

@@ -52,7 +52,8 @@ This module operates via hooks on:
 * **`PlayerScript`**:
   * `OnPlayerBeforeLoadPetFromDB`: Bypasses the Death Knight exception check (which blocks pet loading without the "Master of Ghouls" talent) if the pet is not undead (i.e. demons/elementals).
   * `OnPlayerBeforeTempSummonInitStats`: Intercepts secondary minion summons and sets up `UNIT_MASK_CONTROLLABLE_GUARDIAN` and `CharmInfo` to enable `PetAI` and auto-casting of their default spells.
-  * `OnPlayerIsClass`: Intercepts pet-context class queries, checking the player's learned spells to ensure correct permanency and action bar settings.
+
+  > **Note:** This module does **not** override `OnPlayerIsClass`. On multiclass servers (Dad's MMO Lab / Unbound), class identity — including pet-context class checks — is owned by the dedicated multiclass module. An earlier version gated pet-context class on `HasSpell(<summon>)`, but those servers grant every class's spells into every spellbook, so the check matched all characters and let anyone summon/control demons.
 * **`SpellScript`**:
   * `SpellSummonPetOverrideScript`: Binds to summon spells and checks if the player already has an active pet. If so, it intercepts the hit effect, prevents default dismissal, and spawns the new summon as a controllable guardian.
 
