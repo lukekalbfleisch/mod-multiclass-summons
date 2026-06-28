@@ -170,8 +170,21 @@ class SpellSummonPetOverrideScript : public SpellScript
             float x, y, z;
             owner->GetClosePoint(x, y, z, owner->GetObjectSize());
 
-            // Summon properties Entry 67 is SUMMON_TYPE_MINION
-            SummonPropertiesEntry const* properties = sSummonPropertiesStore.LookupEntry(67);
+            // Create a custom SummonPropertiesEntry so it doesn't dismiss the active pet
+            static SummonPropertiesEntry customProperties;
+            static bool customPropertiesInit = false;
+            if (!customPropertiesInit)
+            {
+                if (SummonPropertiesEntry const* defaultProp = sSummonPropertiesStore.LookupEntry(67))
+                {
+                    customProperties = *defaultProp;
+                    customProperties.Category = SUMMON_CATEGORY_ALLY; // Change to ALLY so it doesn't count as primary pet
+                    customPropertiesInit = true;
+                }
+            }
+
+            SummonPropertiesEntry const* properties = customPropertiesInit ? &customProperties : sSummonPropertiesStore.LookupEntry(67);
+
             int32 duration = GetSpellInfo()->GetDuration();
             if (Player* modOwner = owner->GetSpellModOwner())
                 modOwner->ApplySpellMod(GetSpellInfo()->Id, SPELLMOD_DURATION, duration);
