@@ -80,9 +80,6 @@ public:
                     // Make it controllable so it uses PetAI and auto-casts spells
                     guardian->AddUnitTypeMask(UNIT_MASK_CONTROLLABLE_GUARDIAN);
                     guardian->InitCharmInfo();
-                    
-                    // Force the creature to re-initialize its AI so it picks up PetAI instead of NullAI
-                    guardian->AIM_Initialize();
                 }
             }
         }
