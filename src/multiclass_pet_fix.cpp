@@ -132,9 +132,6 @@ class SpellSummonPetOverrideScript : public SpellScript
 
     void HandleSummon(SpellEffIndex effIndex)
     {
-        if (GetEffectHandleMode() != SPELL_EFFECT_HANDLE_HIT)
-            return;
-
         Player* owner = GetCaster()->ToPlayer();
         if (!owner)
             return;
