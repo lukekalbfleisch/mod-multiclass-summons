@@ -1,4 +1,4 @@
-# wow-unbound-multiclass-summons
+# mod-multiclass-summons
 
 An AzerothCore module for World of Warcraft 3.3.5a (WotLK) that resolves pet limitations in a multiclassing environment (such as Dad's MMO Lab). 
 
@@ -16,9 +16,9 @@ An AzerothCore module for World of Warcraft 3.3.5a (WotLK) that resolves pet lim
 Clone or copy this repository into the `modules/` directory of your AzerothCore source folder:
 ```bash
 cd /path/to/azerothcore-wotlk/modules
-git clone https://github.com/bdodroid/wow-unbound-multiclass-summons.git
+git clone https://github.com/bdodroid/mod-multiclass-summons.git
 ```
-*Note: For **Dad's MMO Lab / The Lab** (e.g. on Steam Deck), the module folder should be placed under `/home/deck/wow-server-playerbots/modules/`.*
+*Note: For **Dad's MMO Lab / The Lab** (e.g. on Steam Deck), the module folder should be placed under `/home/deck/wow-server-playerbots/modules/mod-multiclass-summons`.*
 
 ### 2. Recompile the Server
 Run CMake and compile your server as you normally do:
