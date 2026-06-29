@@ -4,10 +4,12 @@ An AzerothCore module for World of Warcraft 3.3.5a (WotLK) that resolves pet lim
 
 ## Features
 1. **Multiclass Pet Respawn Fix**: Solves the mounting, dismounting, and pet load-blocker bugs when you are a Death Knight base class with a Warlock/Mage subclass. It decouples core pet attribute checks from the player's primary class and checks the pet itself.
-2. **Multi-Active Summons**: Allows players to have multiple summons (Imp, Voidwalker, Succubus, Felhunter, Felguard, Water Elemental, Ghoul) active at the same time. A module-managed registry tracks the side summons (session-only; not restored after relog).
-   * **Primary Summon**: The first summon (cast while the pet slot is free) is a normal, full **real `Pet`** — complete ability bar and full client-side control via the pet action bar/pet frame. The module does not interfere with it.
-   * **Secondary Summons**: Any subsequent summon spawns as a controllable side **guardian**. They follow you, join combat, and auto-cast their creature-template spells (e.g. Firebolt, Waterbolt, Claw). They have no client action bar — a 3.3.5a client limitation (one pet bar only), and their abilities are limited to what the creature template defines.
-   * **One per type**: only one active summon per creature; re-casting refreshes it rather than stacking duplicates. If the primary pet dies/dismisses/expires, the module promotes a remaining side summon to primary automatically (by re-casting it, so it becomes a full real Pet).
+2. **Multi-Active Summons**: Allows players to have multiple summons (Imp, Voidwalker, Succubus, Felhunter, Felguard, Water Elemental, Ghoul) active at the same time. Every summon is a **module-managed controllable guardian** — never a real `Pet`, so nothing is written to `character_pet` and the core's single-class pet checks / mount-stash logic are bypassed (this is what makes it stable across mount/dismount). Summons are session-only (not restored after relog).
+   * **Primary Summon**: The first summon (cast while the pet slot is free) claims the pet slot and gets the full pet **action bar/frame** with client-side control.
+   * **Secondary Summons**: Any subsequent summon spawns as a controllable side guardian — follows you, joins combat, auto-casts its attack. No client action bar (a 3.3.5a one-pet-bar limitation).
+   * **Full abilities**: each summon is given its real pet ability set (correct spell IDs and level-appropriate ranks, sourced from the same pet-spell data the core uses — no hardcoding), so e.g. an Imp has Firebolt/Fire Shield/Phase Shift/Blood Pact rather than just one spell.
+   * **Defensive by default**: summons default to defensive react state (engage when you're attacked / attack), not pull-on-sight.
+   * **One per type**: only one active summon per creature; re-casting refreshes rather than stacking duplicates. If the primary dies/dismisses, the module auto-promotes a remaining summon to primary.
    * **Players only**: playerbots are skipped and keep stock single-pet behaviour (requires playerbots' `WorldSession::IsBot()`).
 
 ---
@@ -50,14 +52,14 @@ DELETE FROM character_pet WHERE owner = [GUID];
 ---
 
 ## Technical Details
-A file-local `SummonManager` tracks each player's **side guardians** (in-memory, session-only): one-per-entry uniqueness, primary promotion, and cleanup. The primary is a real `Pet` owned by the core, not tracked here.
+A file-local `SummonManager` owns every module summon per player (in-memory, session-only): primary/secondary creation, one-per-entry uniqueness, primary promotion, and cleanup.
 
 This module operates via hooks on:
 
-* **`SpellScript`** (`SpellSummonPetOverrideScript`): bound to the summon spells. For non-bot players it decides (`ShouldDivert`): if the pet slot is free, or the cast matches the current primary's entry, it lets the **default real-pet effect** run (full pet). Otherwise it prevents the default and spawns a controllable **side guardian**.
+* **`SpellScript`** (`SpellSummonPetOverrideScript`): bound to the summon spells. For non-bot players it prevents the default real-pet effect and hands the cast to `SummonManager`, which spawns a controllable guardian — primary (claims the pet slot) if the slot is free, otherwise a side guardian.
 * **`PlayerScript`**:
-  * `OnPlayerBeforeTempSummonInitStats`: flags module summon guardians with `UNIT_MASK_CONTROLLABLE_GUARDIAN` + `CharmInfo` (before `AIM_Initialize`) so they pick up `PetAI` and auto-cast.
-  * `OnPlayerUpdate`: throttled (~1s) reconcile — prunes dead summons and promotes a new primary if the slot frees up.
+  * `OnPlayerBeforeTempSummonInitStats`: flags module summon guardians with `UNIT_MASK_CONTROLLABLE_GUARDIAN` + `CharmInfo` and **injects their pet ability set** into the creature's spell slots (before `AIM_Initialize`/`InitCharmCreateSpells`) so they pick up `PetAI`, show their abilities on the bar, and auto-cast.
+  * `OnPlayerUpdate`: throttled (~1s) reconcile — prunes dead summons and promotes a new primary if the slot frees up (guarded so it never fires while mounted, which would crash on dismount).
   * `OnPlayerLogout`: clears/unsummons the player's summons (session-only).
   * `OnPlayerBeforeLoadPetFromDB`: kept for **real** pets only (hunter pets on multiclass characters) — bypasses the Death Knight pet exception for non-undead pets. Module summons are guardians and never use this path.
   * `OnPlayerIsClass`: for **`CLASS_CONTEXT_PET` only**, treats a character as a given class if they have learned that class's pet-summon spell (`HasSpell`), so pet permanency / action bar / power-type checks work for multiclass characters. Strictly gated — it returns `nullopt` for any character that lacks the spell (so it never affects freshly created characters) and for every non-pet context.
