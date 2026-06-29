@@ -4,9 +4,13 @@ An AzerothCore module for World of Warcraft 3.3.5a (WotLK) that resolves pet lim
 
 ## Features
 1. **Multiclass Pet Respawn Fix**: Solves the mounting, dismounting, and pet load-blocker bugs when you are a Death Knight base class with a Warlock/Mage subclass. It decouples core pet attribute checks from the player's primary class and checks the pet itself.
-2. **Multi-Active Summons**: Allows players to have multiple permanent summoning pets (Imp, Voidwalker, Succubus, Felhunter, Felguard, Water Elemental, Ghoul) active at the same time.
-   * **Primary Summon**: The first active summon has full client-side control via the pet action bar/pet frame.
-   * **Secondary Summons**: Any subsequent summon casts while a pet is active will spawn the creature as a controllable guardian/minion. They will follow you, join combat, and auto-cast their main offensive spells (e.g. Firebolt, Waterbolt, Claw).
+2. **Multi-Active Summons**: Allows players to have multiple summons (Imp, Voidwalker, Succubus, Felhunter, Felguard, Water Elemental, Ghoul) active at the same time. These summons are **module-managed controllable guardians** — the module owns their whole lifecycle and never writes them to `character_pet` (session-only; not restored after relog).
+   * **Primary Summon**: The first summon (cast while the pet slot is free) claims the pet slot and gets full client-side control via the pet action bar/pet frame.
+   * **Secondary Summons**: Any subsequent summon spawns as a controllable side guardian. They follow you, join combat, and auto-cast their main offensive spells (e.g. Firebolt, Waterbolt, Claw). They have no client action bar — a 3.3.5a client limitation (one pet bar only).
+   * **One per type**: only one active summon per creature; re-casting refreshes it rather than stacking duplicates. If the primary dies/expires, the module promotes a remaining summon to primary automatically.
+   * **Players only**: playerbots are skipped and keep stock single-pet behaviour (requires playerbots' `WorldSession::IsBot()`).
+
+   > Tradeoff: because every summon is a controllable *guardian* (not a real `Pet`), a primary demon uses its creature-template abilities/autocast rather than a true warlock pet's talent-scaled spellbook. This is what keeps the pet slot deterministic and avoids `character_pet` corruption.
 
 ---
 
@@ -49,19 +53,24 @@ DELETE FROM character_pet WHERE owner = [GUID];
 
 ## Technical Details
 This module operates via hooks on:
-* **`PlayerScript`**:
-  * `OnPlayerBeforeLoadPetFromDB`: Bypasses the Death Knight exception check (which blocks pet loading without the "Master of Ghouls" talent) if the pet is not undead (i.e. demons/elementals).
-  * `OnPlayerBeforeTempSummonInitStats`: Intercepts secondary minion summons and sets up `UNIT_MASK_CONTROLLABLE_GUARDIAN` and `CharmInfo` to enable `PetAI` and auto-casting of their default spells.
+A file-local `SummonManager` owns every module summon per player (in-memory, session-only): creation, one-per-entry uniqueness, primary promotion, and cleanup.
 
-  > **Note:** This module does **not** override `OnPlayerIsClass`. On multiclass servers (Dad's MMO Lab / Unbound), class identity — including pet-context class checks — is owned by the dedicated multiclass module. An earlier version gated pet-context class on `HasSpell(<summon>)`, but those servers grant every class's spells into every spellbook, so the check matched all characters and let anyone summon/control demons.
-* **`SpellScript`**:
-  * `SpellSummonPetOverrideScript`: Binds to summon spells and checks if the player already has an active pet. If so, it intercepts the hit effect, prevents default dismissal, and spawns the new summon as a controllable guardian.
+* **`SpellScript`** (`SpellSummonPetOverrideScript`): bound to the summon spells. For non-bot players it prevents the default real-pet effect and hands the cast to `SummonManager`, which spawns a controllable guardian (primary if the pet slot is free, otherwise a side guardian).
+* **`PlayerScript`**:
+  * `OnPlayerBeforeTempSummonInitStats`: flags module summon guardians with `UNIT_MASK_CONTROLLABLE_GUARDIAN` + `CharmInfo` (before `AIM_Initialize`) so they pick up `PetAI` and auto-cast.
+  * `OnPlayerUpdate`: throttled (~1s) reconcile — prunes dead summons and promotes a new primary if the slot frees up.
+  * `OnPlayerLogout`: clears/unsummons the player's summons (session-only).
+  * `OnPlayerBeforeLoadPetFromDB`: kept for **real** pets only (hunter pets on multiclass characters) — bypasses the Death Knight pet exception for non-undead pets. Module summons are guardians and never use this path.
+
+  > **Note:** This module does **not** override `OnPlayerIsClass`. On multiclass servers class identity is owned by the dedicated multiclass module; gating on `HasSpell(<summon>)` is unreliable there because every class's spells are granted into every spellbook.
 
 ---
 
 ## Compatibility & Single-Class Server Impact
 
-This module is fully compatible with **any** AzerothCore 3.3.5a server setup, whether it runs standard single-class rules or custom multiclassing frameworks (like Dad's MMO Lab / Unbound). It is completely stable, lightweight, and will not cause server crashes or database corruption.
+This module targets AzerothCore 3.3.5a servers running **playerbots** (it skips bots via `WorldSession::IsBot()`), such as Dad's MMO Lab / Unbound. It works on both single-class and custom multiclassing setups. It does not write to `character_pet`, so it cannot cause pet database corruption.
+
+> **Build requirement:** because it calls `WorldSession::IsBot()`, it must be compiled against a core that includes the playerbots module. On a core without playerbots, remove the `IsBot()` guards (or stub them) before building.
 
 ### Single-Class Server Impact (Caveats)
 If installed on a standard, single-class WotLK server, the gameplay changes are minor and isolated:
