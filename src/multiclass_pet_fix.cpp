@@ -239,6 +239,13 @@ namespace
             if (ps.list.empty())
                 return;
 
+            // While mounted / in flight the core temporarily stashes the real pet and
+            // restores it on dismount, so GetPetGUID() is transiently empty. NEVER
+            // promote in that window: re-casting a summon here would create a duplicate
+            // pet that conflicts with the stashed one on dismount and crashes the server.
+            if (owner->IsMounted() || owner->GetTemporaryUnsummonedPetNumber())
+                return;
+
             // If the pet slot is occupied (our primary, or a legit real pet) there is
             // nothing to promote.
             if (!owner->GetPetGUID().IsEmpty())
