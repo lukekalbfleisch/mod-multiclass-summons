@@ -252,8 +252,12 @@ namespace
                 summon->SetName(name);
 
             // Default to defensive: engage when the owner is attacked / attacks, rather
-            // than pulling on sight (Guardian::InitStats left it aggressive).
+            // than pulling on sight (Guardian::InitStats forces aggressive). Guardian
+            // also sent the pet bar (in InitSummon) with the old state, so for the
+            // primary re-send it now that the react state is defensive.
             summon->SetReactState(REACT_DEFENSIVE);
+            if (primary)
+                owner->CharmSpellInitialize();
 
             return summon;
         }
@@ -506,10 +510,32 @@ public:
     }
 };
 
+class MulticlassSummonWorldScript : public WorldScript
+{
+public:
+    MulticlassSummonWorldScript() : WorldScript("MulticlassSummonWorldScript") { }
+
+    // Allow these summons to be cast while another pet is already active. Without
+    // SPELL_ATTR1_DISMISS_PET_FIRST, Spell::CheckCast rejects a SUMMON_PET (or a
+    // pet-category SUMMON, e.g. the temporary Water Elemental) with ALREADY_HAVE_SUMMON
+    // when the caster has a pet, so the (often triggered) Water Elemental / permanent
+    // ghoul summon silently fails. We intercept the effect and spawn a side guardian, so
+    // the "dismiss first" semantics never actually run. Warlock demons already carry this
+    // attribute; setting it again is a no-op. Runs after spells are loaded.
+    void OnStartup() override
+    {
+        static constexpr uint32 spells[] = { 688, 697, 712, 691, 30146, 70907, 70908, 46584, 52150 };
+        for (uint32 id : spells)
+            if (SpellInfo const* info = sSpellMgr->GetSpellInfo(id))
+                const_cast<SpellInfo*>(info)->AttributesEx |= SPELL_ATTR1_DISMISS_PET_FIRST;
+    }
+};
+
 void AddMulticlassPetFixScripts()
 {
     new MulticlassPetFixPlayerScript();
     new SpellSummonPetOverrideLoader();
+    new MulticlassSummonWorldScript();
 
     // NOTE: spell_script_names registration is handled by
     // data/sql/db-world/base/multiclass_summons.sql, which the DBUpdater auto-applies
