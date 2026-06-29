@@ -13,6 +13,7 @@
 #include "WorldSession.h"
 #include <algorithm>
 #include <map>
+#include <numbers>
 #include <unordered_map>
 #include <vector>
 
@@ -71,6 +72,14 @@ namespace
         props.Slot = 0;
         props.Flags = 0;
         return props;
+    }
+
+    // A follow angle (relative to the owner's facing) that spreads summons evenly around
+    // the owner instead of stacking them all on the default PET_FOLLOW_ANGLE.
+    float FollowAngleForIndex(std::size_t index)
+    {
+        constexpr float step = 2.0f * std::numbers::pi_v<float> / 8.0f;
+        return PET_FOLLOW_ANGLE + step * float(index % 8);
     }
 
     // Give a guardian the ability set the matching pet would have at the owner's level,
@@ -184,8 +193,9 @@ namespace
             RemoveEntry(owner, ps, entry);
 
             bool const primary = owner->GetPetGUID().IsEmpty();
+            float const followAngle = FollowAngleForIndex(ps.list.size());
 
-            if (TempSummon* summon = CreateGuardian(owner, entry, spellId, duration, primary))
+            if (TempSummon* summon = CreateGuardian(owner, entry, spellId, duration, primary, followAngle))
             {
                 ps.list.push_back({ summon->GetGUID(), entry, spellId, duration, primary });
                 LOG_INFO("module.multiclass_pet_fix", "Summon: {} entry {} (spell {}) as {} for {}",
@@ -233,13 +243,16 @@ namespace
 
         std::unordered_map<ObjectGuid, PlayerSummons> _players;
 
-        TempSummon* CreateGuardian(Player* owner, uint32 entry, uint32 spellId, int32 duration, bool primary)
+        TempSummon* CreateGuardian(Player* owner, uint32 entry, uint32 spellId, int32 duration, bool primary,
+            float followAngle)
         {
             static SummonPropertiesEntry const primaryProps = MakeProps(SUMMON_CATEGORY_PET, SUMMON_TYPE_PET);
             static SummonPropertiesEntry const secondaryProps = MakeProps(SUMMON_CATEGORY_ALLY, SUMMON_TYPE_GUARDIAN);
 
+            // Spawn at the summon's follow position (out at pet range, at its own angle)
+            // so they appear spread out rather than on top of each other.
             float x, y, z;
-            owner->GetClosePoint(x, y, z, owner->GetObjectSize());
+            owner->GetClosePoint(x, y, z, owner->GetObjectSize(), PET_FOLLOW_DIST, followAngle);
 
             TempSummon* summon = owner->GetMap()->SummonCreature(entry,
                 Position(x, y, z, owner->GetOrientation()),
@@ -247,6 +260,9 @@ namespace
                 duration, owner, spellId);
             if (!summon)
                 return nullptr;
+
+            // Keep the summon following at its own angle around the owner.
+            static_cast<Minion*>(summon)->SetFollowAngle(followAngle);
 
             if (std::string name = sObjectMgr->GeneratePetName(entry); !name.empty())
                 summon->SetName(name);
@@ -310,7 +326,10 @@ namespace
             Unsummon(owner, promote.guid);
             ps.list.erase(ps.list.begin());
 
-            if (TempSummon* summon = CreateGuardian(owner, promote.entry, promote.spellId, promote.duration, true))
+            float const followAngle = FollowAngleForIndex(ps.list.size());
+
+            if (TempSummon* summon = CreateGuardian(owner, promote.entry, promote.spellId, promote.duration,
+                true, followAngle))
             {
                 ps.list.push_back({ summon->GetGUID(), promote.entry, promote.spellId, promote.duration, true });
                 LOG_INFO("module.multiclass_pet_fix", "Promoted entry {} (spell {}) to primary for {}",
