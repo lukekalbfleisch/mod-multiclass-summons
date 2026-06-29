@@ -1,6 +1,7 @@
 #include "ScriptMgr.h"
 #include "Player.h"
 #include "Pet.h"
+#include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "SpellScript.h"
 #include "SpellInfo.h"
@@ -140,26 +141,43 @@ class SpellSummonPetOverrideScript : public SpellScript
         if (!owner)
             return;
 
-        // Diagnostic: confirm the override fires and on which spell/effect. Grep the
-        // worldserver log for "module.multiclass_pet_fix". Demote to LOG_DEBUG once the
-        // secondary-summon behaviour is verified for every pet type.
-        ObjectGuid const petGuid = owner->GetPetGUID();
-        LOG_INFO("module.multiclass_pet_fix", "HandleSummon fired: spell {} effIdx {} caster {} GetPetGUID {}",
-            GetSpellInfo()->Id, uint32(effIndex), owner->GetName(), petGuid.ToString());
+        uint32 const petEntry = GetSpellInfo()->Effects[effIndex].MiscValue;
+        if (!petEntry)
+            return;
 
-        // Only divert to a side guardian when the player already has a primary pet.
         // GetPetGUID() (the SUMMON_SLOT_PET slot) covers both real Pet objects and
         // slot-claiming guardian pets, whereas GetPet() only matches true Pets and
         // would miss guardian-style primaries (e.g. permanent Water Elemental / Ghoul).
+        ObjectGuid const petGuid = owner->GetPetGUID();
+
+        // Diagnostic: confirm the override fires and on which spell/effect. Grep the
+        // worldserver log for "module.multiclass_pet_fix". Demote to LOG_DEBUG once the
+        // secondary-summon behaviour is verified for every pet type.
+        LOG_INFO("module.multiclass_pet_fix", "HandleSummon fired: spell {} effIdx {} entry {} caster {} GetPetGUID {}",
+            GetSpellInfo()->Id, uint32(effIndex), petEntry, owner->GetName(), petGuid.ToString());
+
+        // Recasting the entry that is ALREADY the primary pet: let the default effect
+        // refresh it in place rather than spawning a duplicate (avoids an "army" of
+        // the same pet when the player spams their primary's summon spell).
+        if (petGuid)
+            if (Creature* primary = ObjectAccessor::GetCreatureOrPetOrVehicle(*owner, petGuid))
+                if (primary->GetEntry() == petEntry)
+                    return;
+
+        // Enforce one active summon per creature entry: remove any existing instance of
+        // this creature (a leftover side guardian of the same type) before continuing.
+        // This both prevents duplicate clones and clears stale state that otherwise
+        // breaks a later re-summon of the same pet.
+        owner->RemoveAllMinionsByEntry(petEntry);
+
+        // No primary pet present: let the default effect make this summon the primary
+        // pet (full client control via the pet action bar / pet frame).
         if (!petGuid)
             return;
 
-        // Prevent the default summon effect, which would dismiss the active pet.
+        // A different pet is already primary: spawn this one as a controllable side
+        // guardian, and prevent the default effect that would dismiss the active pet.
         PreventHitDefaultEffect(effIndex);
-
-        uint32 petEntry = GetSpellInfo()->Effects[effIndex].MiscValue;
-        if (!petEntry)
-            return;
 
         // Summon a controllable guardian that does NOT claim the pet slot:
         //   - Category ALLY keeps Minion::IsGuardianPet() false, so Unit::SetMinion
