@@ -58,13 +58,12 @@ namespace
         return player->GetSession() && player->GetSession()->IsBot();
     }
 
-    // Build a SummonProperties for a controllable guardian.
-    //   Primary:   Category PET   -> claims the pet slot + action bar (like the
-    //              permanent Water Elemental). IsGuardianPet() is true.
-    //   Secondary: Category ALLY  -> does NOT claim the slot (IsGuardianPet() false),
-    //              so it never dismisses the primary. Type GUARDIAN makes
-    //              Map::SummonCreature instantiate a Guardian; the controllable mask
-    //              is added in OnPlayerBeforeTempSummonInitStats before AIM_Initialize.
+    // Build SummonProperties for a controllable side guardian: Category ALLY so it does
+    // NOT claim the pet slot (IsGuardianPet() false -> never dismisses the primary),
+    // Type GUARDIAN so Map::SummonCreature instantiates a Guardian. The controllable
+    // mask is added in OnPlayerBeforeTempSummonInitStats (before AIM_Initialize) so the
+    // AI factory selects PetAI. The PRIMARY is a real Pet (default effect), not built
+    // here, so it keeps its full pet ability bar.
     SummonPropertiesEntry MakeProps(uint32 category, uint32 type)
     {
         SummonPropertiesEntry props{};
@@ -77,13 +76,14 @@ namespace
         return props;
     }
 
+    // A module-managed side guardian (the primary is a real Pet, tracked by the core's
+    // pet slot, not here).
     struct ActiveSummon
     {
         ObjectGuid guid;
         uint32 entry;
         uint32 spellId;
         int32 duration;
-        bool primary;
     };
 
     struct PlayerSummons
@@ -103,28 +103,50 @@ namespace
             return instance;
         }
 
-        // A target summon spell was cast. Spawn it as primary (slot free) or as a
-        // side guardian, enforcing one active summon per creature entry.
-        void HandleCast(Player* owner, uint32 spellId, uint32 entry, int32 duration)
+        // Should this cast be diverted to a side guardian? No when the player has no
+        // primary pet (let the default effect make a FULL real Pet), or when they are
+        // re-casting the entry that is already their primary (let it refresh in place).
+        bool ShouldDivert(Player* owner, uint32 entry)
+        {
+            ObjectGuid const petGuid = owner->GetPetGUID();
+            if (petGuid.IsEmpty())
+                return false;
+
+            if (Creature* primary = ObjectAccessor::GetCreatureOrPetOrVehicle(*owner, petGuid))
+                if (primary->GetEntry() == entry)
+                    return false;
+
+            return true;
+        }
+
+        // Remove any existing side guardian of this entry. Used when the entry is about
+        // to become (or refresh) the real primary pet, so we never keep a primary plus a
+        // duplicate guardian of the same creature.
+        void DropEntry(Player* owner, uint32 entry)
+        {
+            auto it = _players.find(owner->GetGUID());
+            if (it == _players.end())
+                return;
+
+            RemoveEntry(owner, it->second, entry);
+            if (it->second.list.empty())
+                _players.erase(it);
+        }
+
+        // Spawn a controllable side guardian, enforcing one active summon per entry.
+        void AddSecondary(Player* owner, uint32 spellId, uint32 entry, int32 duration)
         {
             PlayerSummons& ps = _players[owner->GetGUID()];
-
-            // One active summon per creature entry: drop any existing instance first
-            // (a re-cast refreshes rather than stacking an army of clones).
             RemoveEntry(owner, ps, entry);
 
-            // First summon while the pet slot is free becomes the controllable
-            // primary; otherwise (a pet/guardian already holds the slot) it is a
-            // side guardian. Using the slot keeps us compatible with any real pet
-            // the player legitimately has (e.g. a hunter pet on a multiclass char).
-            bool const primary = owner->GetPetGUID().IsEmpty();
-
-            if (TempSummon* summon = CreateGuardian(owner, entry, spellId, duration, primary))
+            if (TempSummon* summon = CreateGuardian(owner, entry, spellId, duration))
             {
-                ps.list.push_back({ summon->GetGUID(), entry, spellId, duration, primary });
-                LOG_INFO("module.multiclass_pet_fix", "Summon: {} entry {} (spell {}) as {} for {}",
-                    summon->GetGUID().ToString(), entry, spellId, primary ? "PRIMARY" : "guardian", owner->GetName());
+                ps.list.push_back({ summon->GetGUID(), entry, spellId, duration });
+                LOG_INFO("module.multiclass_pet_fix", "Summon: {} entry {} (spell {}) as guardian for {}",
+                    summon->GetGUID().ToString(), entry, spellId, owner->GetName());
             }
+            else if (ps.list.empty())
+                _players.erase(owner->GetGUID());
         }
 
         // Throttled per-player reconcile: prune dead summons and, if the primary is
@@ -166,18 +188,16 @@ namespace
 
         std::unordered_map<ObjectGuid, PlayerSummons> _players;
 
-        TempSummon* CreateGuardian(Player* owner, uint32 entry, uint32 spellId, int32 duration, bool primary)
+        TempSummon* CreateGuardian(Player* owner, uint32 entry, uint32 spellId, int32 duration)
         {
-            static SummonPropertiesEntry const primaryProps = MakeProps(SUMMON_CATEGORY_PET, SUMMON_TYPE_PET);
-            static SummonPropertiesEntry const secondaryProps = MakeProps(SUMMON_CATEGORY_ALLY, SUMMON_TYPE_GUARDIAN);
+            static SummonPropertiesEntry const props = MakeProps(SUMMON_CATEGORY_ALLY, SUMMON_TYPE_GUARDIAN);
 
             float x, y, z;
             owner->GetClosePoint(x, y, z, owner->GetObjectSize());
 
             TempSummon* summon = owner->GetMap()->SummonCreature(entry,
                 Position(x, y, z, owner->GetOrientation()),
-                primary ? &primaryProps : &secondaryProps,
-                duration, owner, spellId);
+                &props, duration, owner, spellId);
             if (!summon)
                 return nullptr;
 
@@ -225,17 +245,15 @@ namespace
                 return;
 
             // The primary is gone and the slot is free: promote the oldest remaining
-            // summon by re-spawning it as the controllable primary.
+            // summon by re-casting its summon spell. With the slot now free, ShouldDivert
+            // returns false, so the default effect runs and produces a full real Pet.
             ActiveSummon const promote = ps.list.front();
             Unsummon(owner, promote.guid);
             ps.list.erase(ps.list.begin());
 
-            if (TempSummon* summon = CreateGuardian(owner, promote.entry, promote.spellId, promote.duration, true))
-            {
-                ps.list.push_back({ summon->GetGUID(), promote.entry, promote.spellId, promote.duration, true });
-                LOG_INFO("module.multiclass_pet_fix", "Promoted entry {} (spell {}) to primary for {}",
-                    promote.entry, promote.spellId, owner->GetName());
-            }
+            owner->CastSpell(owner, promote.spellId, true);
+            LOG_INFO("module.multiclass_pet_fix", "Promoted entry {} (spell {}) to primary pet for {}",
+                promote.entry, promote.spellId, owner->GetName());
         }
     };
 }
@@ -248,6 +266,7 @@ public:
         PLAYERHOOK_ON_BEFORE_LOAD_PET_FROM_DB,
         PLAYERHOOK_ON_BEFORE_GUARDIAN_INIT_STATS_FOR_LEVEL,
         PLAYERHOOK_ON_BEFORE_TEMP_SUMMON_INIT_STATS,
+        PLAYERHOOK_ON_PLAYER_IS_CLASS,
         PLAYERHOOK_ON_UPDATE,
         PLAYERHOOK_ON_LOGOUT
     }) { }
@@ -306,6 +325,43 @@ public:
         }
     }
 
+    // Pet-context class identity for multiclass characters: if a character has learned
+    // another class's pet-summon spell, treat them as that class for PET-ONLY checks
+    // (pet permanency, action bar, power type). Strictly gated on HasSpell and
+    // CLASS_CONTEXT_PET, so it never fires for a character that lacks the spell (e.g. a
+    // freshly created character), and returns nullopt to defer to the real class
+    // everywhere else.
+    Optional<bool> OnPlayerIsClass(Player const* player, Classes playerClass, ClassContext context) override
+    {
+        if (context != CLASS_CONTEXT_PET)
+            return std::nullopt;
+
+        switch (playerClass)
+        {
+            case CLASS_WARLOCK:
+                if (player->HasSpell(688) || player->HasSpell(697) || player->HasSpell(712) ||
+                    player->HasSpell(691) || player->HasSpell(30146))
+                    return true;
+                break;
+            case CLASS_MAGE:
+                if (player->HasSpell(31687))
+                    return true;
+                break;
+            case CLASS_DEATH_KNIGHT:
+                if (player->HasSpell(46584))
+                    return true;
+                break;
+            case CLASS_HUNTER:
+                if (player->HasSpell(883))
+                    return true;
+                break;
+            default:
+                break;
+        }
+
+        return std::nullopt;
+    }
+
     // Flag module summon guardians controllable during InitStats (before AddToWorld
     // -> AIM_Initialize), so the AI factory selects PetAI (follow + autocast).
     // Primary summons (PET category) are already controllable from their ctor; doing
@@ -360,15 +416,30 @@ class SpellSummonPetOverrideScript : public SpellScript
         if (!entry)
             return;
 
-        // The module owns every one of these summons — never run the default
-        // (real-pet) effect, which would dismiss the active pet.
+        SummonManager& manager = SummonManager::Instance();
+        bool const divert = manager.ShouldDivert(owner, entry);
+
+        LOG_INFO("module.multiclass_pet_fix", "HandleSummon: spell {} entry {} caster {} -> {}",
+            GetSpellInfo()->Id, entry, owner->GetName(), divert ? "side guardian" : "default real pet");
+
+        // No primary pet (or re-casting the current primary's entry): let the default
+        // effect run so the player gets a FULL real Pet with its complete ability bar.
+        // Just make sure we don't leave a duplicate side guardian of this entry behind.
+        if (!divert)
+        {
+            manager.DropEntry(owner, entry);
+            return;
+        }
+
+        // A different pet already holds the slot: spawn this summon as a controllable
+        // side guardian and suppress the default (real-pet) effect.
         PreventHitDefaultEffect(effIndex);
 
         int32 duration = GetSpellInfo()->GetDuration();
         if (Player* modOwner = owner->GetSpellModOwner())
             modOwner->ApplySpellMod(GetSpellInfo()->Id, SPELLMOD_DURATION, duration);
 
-        SummonManager::Instance().HandleCast(owner, GetSpellInfo()->Id, entry, duration);
+        manager.AddSecondary(owner, GetSpellInfo()->Id, entry, duration);
     }
 
     void Register() override
