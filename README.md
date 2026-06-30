@@ -1,6 +1,6 @@
 # mod-multiclass-summons
 
-An AzerothCore module for World of Warcraft 3.3.5a (WotLK) that resolves pet limitations in a multiclassing environment (such as Dad's MMO Lab). 
+An AzerothCore module for World of Warcraft 3.3.5a (WotLK) that resolves pet limitations in a multiclassing environment (such as DadsMMOLab's Unbound). 
 
 ---
 
