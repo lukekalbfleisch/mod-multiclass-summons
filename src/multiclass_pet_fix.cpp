@@ -57,9 +57,26 @@ namespace
         }
     }
 
+    template <typename T>
+    bool IsPlayerBotHelper(T const* player)
+    {
+        auto* session = player->GetSession();
+        if (!session)
+            return false;
+
+        if constexpr (requires { session->IsBot(); })
+        {
+            return session->IsBot();
+        }
+        else
+        {
+            return false;
+        }
+    }
+
     bool IsPlayerBot(Player const* player)
     {
-        return player->GetSession() && player->GetSession()->IsBot();
+        return IsPlayerBotHelper(player);
     }
 
     SummonPropertiesEntry MakeProps(uint32 category, uint32 type)
