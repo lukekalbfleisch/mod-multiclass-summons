@@ -4,6 +4,8 @@
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "SpellScript.h"
+#include "SpellAuras.h"
+#include "SpellAuraEffects.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
 #include "CharmInfo.h"
@@ -169,6 +171,39 @@ namespace
         }
         for (; slot < MAX_SPELL_CHARM; ++slot)
             guardian->m_spells[slot] = 0;
+    }
+
+    // Every class pet-scaling passive computes its amount from the owner's CURRENT stats, but
+    // only the WARLOCK script (spell_warl_generic_scaling) re-runs that calc on its own 2s tick
+    // for a non-pet guardian. The MAGE and DK scripts early-out of their periodic tick on
+    // !IsPet, so as guardians their scaling would freeze at summon-time values (that's why a
+    // summoned Water Elemental / ghoul never tracked owner gear). Re-running RecalculateAmount()
+    // on each present scaling aura re-reads the owner's stats and reapplies — giving every module
+    // guardian the same live gear/stat tracking the warlock imp gets for free. Called ~1s from
+    // the reconcile loop. Cheap: a handful of arithmetic recalcs per guardian; no-op for auras
+    // the guardian doesn't carry.
+    void RefreshScalingAuras(Creature* guardian)
+    {
+        static constexpr uint32 scalingIds[] = {
+            SPELL_WARLOCK_PET_SCALING_01, SPELL_WARLOCK_PET_SCALING_02, SPELL_WARLOCK_PET_SCALING_03,
+            SPELL_WARLOCK_PET_SCALING_04, SPELL_WARLOCK_PET_SCALING_05,
+            SPELL_MAGE_PET_SCALING_01, SPELL_MAGE_PET_SCALING_02, SPELL_MAGE_PET_SCALING_03,
+            SPELL_MAGE_PET_SCALING_04,
+            SPELL_DK_PET_SCALING_01, SPELL_DK_PET_SCALING_02, SPELL_DK_PET_SCALING_03,
+            SPELL_HUNTER_PET_SCALING_04 };
+
+        bool any = false;
+        for (uint32 id : scalingIds)
+            if (Aura* aura = guardian->GetAura(id))
+                for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+                    if (AuraEffect* eff = aura->GetEffect(i))
+                    {
+                        eff->RecalculateAmount();
+                        any = true;
+                    }
+
+        if (any)
+            guardian->UpdateAllStats();
     }
 
     struct ActiveSummon
@@ -366,30 +401,12 @@ namespace
                 }),
                 ps.list.end());
 
-            // TEMP DEBUG (ghoul follow investigation) — remove after diagnosis. Logs the live
-            // movement/command state of any ghoul (entry 26125) each reconcile so we can see what
-            // blocks its initial follow and what changes once combat "unsticks" it.
-            for (ActiveSummon const& dbg : ps.list)
-            {
-                if (dbg.entry != 26125)
-                    continue;
-                Creature* g = ObjectAccessor::GetCreature(*owner, dbg.guid);
-                if (!g)
-                    continue;
-                CharmInfo* ci = g->GetCharmInfo();
-                LOG_ERROR("module.multiclass_pet_fix",
-                    "GHOULDBG {} spell={} curGen={} ctrlSlot={} react={} cmd={} following={} returning={} victim={} forcedSpell={} casting={}",
-                    dbg.primary ? "PRI" : "sec", dbg.spellId,
-                    (int)g->GetMotionMaster()->GetCurrentMovementGeneratorType(),
-                    (int)g->GetMotionMaster()->GetMotionSlotType(MOTION_SLOT_CONTROLLED),
-                    (int)g->GetReactState(),
-                    ci ? (int)ci->GetCommandState() : -99,
-                    ci ? (int)ci->IsFollowing() : -99,
-                    ci ? (int)ci->IsReturning() : -99,
-                    g->GetVictim() ? 1 : 0,
-                    ci ? ci->GetForcedSpell() : 0,
-                    (int)g->HasUnitState(UNIT_STATE_CASTING));
-            }
+            // Re-inherit owner gear/stats on every live guardian (~1s). Warlock summons would
+            // track on their own; mage/DK ones would freeze at summon-time values without this.
+            for (ActiveSummon const& summon : ps.list)
+                if (Creature* creature = ObjectAccessor::GetCreature(*owner, summon.guid))
+                    if (creature->IsGuardian())
+                        RefreshScalingAuras(creature);
 
             if (ps.list.empty())
                 return;
@@ -488,6 +505,56 @@ public:
             {
                 petType = guardian->ToPet()->getPetType();
             }
+            return;
+        }
+
+        // Warlock-demon gear scaling. Our demon summons are pure guardians, so they never
+        // travel the real-pet path (LearnPetPassives / InitLevelupSpellsForLevel) that gives a
+        // real imp/felguard the warlock pet scaling passives. Core's Guardian::InitStatsForLevel
+        // only injects scaling auras for a fixed set of guardian entries (Infernal, Doomguard,
+        // Water Elemental, ...) and the five standard demons fall through with none — so owner
+        // gear never reaches them. Add the same passives core gives the Doomguard, here in the
+        // hook core fires from InitStatsForLevel (before its own switch and the closing
+        // UpdateAllStats). spell_warl_generic_scaling then inherits owner stamina/int/spell
+        // power/armor/hit and recalculates every 2s, so the summon tracks gear and level in real
+        // time. Fires again from RescaleForLevel, so a re-init re-asserts the auras. Idempotent:
+        // AddAura of an already-present spell refreshes rather than stacks. Gated on the module's
+        // own summon spell so it never touches an unrelated guardian.
+        if (!IsMulticlassSummonSpell(guardian->GetUInt32Value(UNIT_CREATED_BY_SPELL)))
+            return;
+
+        switch (guardian->GetEntry())
+        {
+            case NPC_IMP:
+            case NPC_VOIDWALKER:
+            case NPC_SUCCUBUS:
+            case NPC_FELHUNTER:
+            case NPC_FELGUARD:
+                guardian->AddAura(SPELL_PET_AVOIDANCE, guardian);
+                guardian->AddAura(SPELL_WARLOCK_PET_SCALING_01, guardian);
+                guardian->AddAura(SPELL_WARLOCK_PET_SCALING_02, guardian);
+                guardian->AddAura(SPELL_WARLOCK_PET_SCALING_03, guardian);
+                guardian->AddAura(SPELL_WARLOCK_PET_SCALING_04, guardian);
+                guardian->AddAura(SPELL_WARLOCK_PET_SCALING_05, guardian);
+                break;
+            // Water Elemental. The PERMANENT entry (37994) is only handled in core's
+            // `case SUMMON_PET:` branch, which a guardian never reaches, so it receives NO mage
+            // scaling auras at all. The TEMP entry (510) does get them from core's default
+            // branch, but adding them here too is idempotent and keeps both paths uniform.
+            // Mirrors the aura set core gives a Water Elemental.
+            case NPC_WATER_ELEMENTAL_TEMP:
+            case NPC_WATER_ELEMENTAL_PERM:
+                guardian->AddAura(SPELL_PET_AVOIDANCE, guardian);
+                guardian->AddAura(SPELL_HUNTER_PET_SCALING_04, guardian); // hit / expertise
+                guardian->AddAura(SPELL_MAGE_PET_SCALING_01, guardian);
+                guardian->AddAura(SPELL_MAGE_PET_SCALING_02, guardian);
+                guardian->AddAura(SPELL_MAGE_PET_SCALING_03, guardian);
+                guardian->AddAura(SPELL_MAGE_PET_SCALING_04, guardian);
+                break;
+            // Ghoul (26125) gets its DK scaling auras from core's own NPC_RISEN_GHOUL /
+            // !IsPet() block, so no AddAura needed here — RefreshScalingAuras drives them live.
+            default:
+                break;
         }
     }
 
