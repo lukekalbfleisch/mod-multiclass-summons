@@ -16,5 +16,6 @@ INSERT INTO `spell_script_names` (`spell_id`, `ScriptName`) VALUES
 (30146, 'spell_summon_pet_override'),   -- Summon Felguard
 (70907, 'spell_summon_pet_override'),   -- Summon Water Elemental (Temp)
 (70908, 'spell_summon_pet_override'),   -- Summon Water Elemental (Perm)
-(46584, 'spell_summon_pet_override'),   -- Raise Dead (Temp Ghoul)
-(52150, 'spell_summon_pet_override');   -- Raise Dead (Perm Ghoul)
+(46585, 'spell_summon_pet_override'),   -- Raise Dead -> Ghoul (Temp, no Master of Ghouls). NOTE: 46584 is a
+                                        -- launcher (SCRIPT_EFFECT/DUMMY) with no summon effect; it casts 46585.
+(52150, 'spell_summon_pet_override');   -- Raise Dead -> Ghoul (Perm, Master of Ghouls)

@@ -9,6 +9,7 @@
 #include "CharmInfo.h"
 #include "DBCStores.h"
 #include "Map.h"
+#include "MotionMaster.h"
 #include "TemporarySummon.h"
 #include "WorldSession.h"
 #include <algorithm>
@@ -49,8 +50,8 @@ namespace
             case 30146: // Summon Felguard
             case 70907: // Summon Water Elemental (Temp)
             case 70908: // Summon Water Elemental (Perm)
-            case 46584: // Raise Dead (Temp Ghoul)
-            case 52150: // Raise Dead (Perm Ghoul)
+            case 46585: // Raise Dead -> Ghoul (Temp; 46584 launches this, has no summon effect itself)
+            case 52150: // Raise Dead -> Ghoul (Perm, Master of Ghouls)
                 return true;
             default:
                 return false;
@@ -242,6 +243,33 @@ namespace
                 _players.erase(it);
         }
 
+        // Owner levelled up: rescale every live guardian to the new level in place. We reuse
+        // the pet level-up path (Guardian::InitStatsForLevel) but (a) preserve the player's
+        // chosen react state, which InitStatsForLevel can reset, and (b) strip the risen-ghoul
+        // emerge stun (47466) it re-applies, so a ding never re-stuns an already-active ghoul.
+        // Note: this rescales stats only; it does not rebuild the action bar, so higher-rank
+        // abilities still require a resummon.
+        void RescaleForLevel(Player* owner)
+        {
+            auto it = _players.find(owner->GetGUID());
+            if (it == _players.end())
+                return;
+
+            uint8 const level = owner->GetLevel();
+            for (ActiveSummon const& summon : it->second.list)
+            {
+                Creature* creature = ObjectAccessor::GetCreature(*owner, summon.guid);
+                if (!creature || !creature->IsAlive() || !creature->IsGuardian())
+                    continue;
+
+                Guardian* guardian = static_cast<Guardian*>(creature);
+                ReactStates const react = guardian->GetReactState();
+                guardian->InitStatsForLevel(level);
+                guardian->SetReactState(react);
+                guardian->RemoveAurasDueToSpell(47466); // SPELL_RISEN_GHOUL_SELF_STUN, no-op on non-ghouls
+            }
+        }
+
         // Session-only: drop the registry (and despawn the summons) when the player leaves.
         void Clear(Player* owner)
         {
@@ -292,6 +320,20 @@ namespace
             if (primary)
                 owner->CharmSpellInitialize();
 
+            // Strip the risen-ghoul emerge stun (47466) that Guardian::InitStatsForLevel applies:
+            // it roots the fresh ghoul and clears its target, which blocks PetAI's initial
+            // MoveFollow, so a summoned ghoul stands idle at its spawn spot until its first fight
+            // clears the state. Removing it lets the ghoul follow/obey immediately, like the other
+            // summons. Runs once per summon and is a no-op for non-ghoul entries.
+            summon->RemoveAurasDueToSpell(47466);
+
+            // PetAI does not reliably establish the follow for a freshly summoned guardian: if
+            // the summon is mid-autocast/forced-spell on its first AI ticks (the ghoul does this),
+            // PetAI skips its return-movement path and the summon sits idle at its spawn spot until
+            // its first fight. This hits primary and secondary summons alike, so start the follow
+            // explicitly for every summon. Movement-only — does not affect the primary's pet bar.
+            summon->GetMotionMaster()->MoveFollow(owner, PET_FOLLOW_DIST, followAngle);
+
             return summon;
         }
 
@@ -323,6 +365,31 @@ namespace
                     return !creature || !creature->IsAlive();
                 }),
                 ps.list.end());
+
+            // TEMP DEBUG (ghoul follow investigation) — remove after diagnosis. Logs the live
+            // movement/command state of any ghoul (entry 26125) each reconcile so we can see what
+            // blocks its initial follow and what changes once combat "unsticks" it.
+            for (ActiveSummon const& dbg : ps.list)
+            {
+                if (dbg.entry != 26125)
+                    continue;
+                Creature* g = ObjectAccessor::GetCreature(*owner, dbg.guid);
+                if (!g)
+                    continue;
+                CharmInfo* ci = g->GetCharmInfo();
+                LOG_ERROR("module.multiclass_pet_fix",
+                    "GHOULDBG {} spell={} curGen={} ctrlSlot={} react={} cmd={} following={} returning={} victim={} forcedSpell={} casting={}",
+                    dbg.primary ? "PRI" : "sec", dbg.spellId,
+                    (int)g->GetMotionMaster()->GetCurrentMovementGeneratorType(),
+                    (int)g->GetMotionMaster()->GetMotionSlotType(MOTION_SLOT_CONTROLLED),
+                    (int)g->GetReactState(),
+                    ci ? (int)ci->GetCommandState() : -99,
+                    ci ? (int)ci->IsFollowing() : -99,
+                    ci ? (int)ci->IsReturning() : -99,
+                    g->GetVictim() ? 1 : 0,
+                    ci ? ci->GetForcedSpell() : 0,
+                    (int)g->HasUnitState(UNIT_STATE_CASTING));
+            }
 
             if (ps.list.empty())
                 return;
@@ -366,6 +433,7 @@ public:
         PLAYERHOOK_ON_BEFORE_TEMP_SUMMON_INIT_STATS,
         PLAYERHOOK_ON_PLAYER_IS_CLASS,
         PLAYERHOOK_ON_UPDATE,
+        PLAYERHOOK_ON_LEVEL_CHANGED,
         PLAYERHOOK_ON_LOGOUT
     }) { }
 
@@ -488,6 +556,18 @@ public:
         SummonManager::Instance().Update(player, diff);
     }
 
+    // Rescale any already-active summons to the new level when the owner dings, so a
+    // summon that was out before the level-up doesn't stay frozen at its old level (the
+    // core only auto-syncs real Pets, not our guardians). Level-up only — cheap, and it
+    // avoids re-running the stat init every tick.
+    void OnPlayerLevelChanged(Player* player, uint8 /*oldLevel*/) override
+    {
+        if (IsPlayerBot(player))
+            return;
+
+        SummonManager::Instance().RescaleForLevel(player);
+    }
+
     void OnPlayerLogout(Player* player) override
     {
         SummonManager::Instance().Clear(player);
@@ -503,6 +583,8 @@ class SpellSummonPetOverrideScript : public SpellScript
         Player* owner = GetCaster()->ToPlayer();
         if (!owner)
             return;
+
+        LOG_ERROR("module.multiclass_pet_fix", "SUMMONS MODULE - HandleSummon called for spell {} (caster {})", GetSpellInfo()->Id, owner->GetName());
 
         // Leave playerbots on stock single-pet behaviour (their AI relies on GetPet()).
         if (IsPlayerBot(owner))
@@ -560,7 +642,7 @@ public:
     // attribute; setting it again is a no-op. Runs after spells are loaded.
     void OnStartup() override
     {
-        static constexpr uint32 spells[] = { 688, 697, 712, 691, 30146, 70907, 70908, 46584, 52150 };
+        static constexpr uint32 spells[] = { 688, 697, 712, 691, 30146, 70907, 70908, 46585, 52150 };
         for (uint32 id : spells)
             if (SpellInfo const* info = sSpellMgr->GetSpellInfo(id))
                 const_cast<SpellInfo*>(info)->AttributesEx |= SPELL_ATTR1_DISMISS_PET_FIRST;
@@ -569,11 +651,8 @@ public:
 
 void AddMulticlassPetFixScripts()
 {
+    LOG_ERROR("module.multiclass_pet_fix", "SUMMONS MODULE - AddMulticlassPetFixScripts called!");
     new MulticlassPetFixPlayerScript();
     new SpellSummonPetOverrideLoader();
     new MulticlassSummonWorldScript();
-
-    // NOTE: spell_script_names registration is handled by
-    // data/sql/db-world/base/multiclass_summons.sql, which the DBUpdater auto-applies
-    // during database loading at startup, BEFORE LoadSpellScriptNames().
 }
