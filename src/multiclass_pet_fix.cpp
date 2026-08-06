@@ -4,11 +4,14 @@
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "SpellScript.h"
+#include "SpellAuras.h"
+#include "SpellAuraEffects.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
 #include "CharmInfo.h"
 #include "DBCStores.h"
 #include "Map.h"
+#include "MotionMaster.h"
 #include "TemporarySummon.h"
 #include "WorldSession.h"
 #include <algorithm>
@@ -49,8 +52,8 @@ namespace
             case 30146: // Summon Felguard
             case 70907: // Summon Water Elemental (Temp)
             case 70908: // Summon Water Elemental (Perm)
-            case 46584: // Raise Dead (Temp Ghoul)
-            case 52150: // Raise Dead (Perm Ghoul)
+            case 46585: // Raise Dead -> Ghoul (Temp; 46584 launches this, has no summon effect itself)
+            case 52150: // Raise Dead -> Ghoul (Perm, Master of Ghouls)
                 return true;
             default:
                 return false;
@@ -170,6 +173,39 @@ namespace
             guardian->m_spells[slot] = 0;
     }
 
+    // Every class pet-scaling passive computes its amount from the owner's CURRENT stats, but
+    // only the WARLOCK script (spell_warl_generic_scaling) re-runs that calc on its own 2s tick
+    // for a non-pet guardian. The MAGE and DK scripts early-out of their periodic tick on
+    // !IsPet, so as guardians their scaling would freeze at summon-time values (that's why a
+    // summoned Water Elemental / ghoul never tracked owner gear). Re-running RecalculateAmount()
+    // on each present scaling aura re-reads the owner's stats and reapplies — giving every module
+    // guardian the same live gear/stat tracking the warlock imp gets for free. Called ~1s from
+    // the reconcile loop. Cheap: a handful of arithmetic recalcs per guardian; no-op for auras
+    // the guardian doesn't carry.
+    void RefreshScalingAuras(Creature* guardian)
+    {
+        static constexpr uint32 scalingIds[] = {
+            SPELL_WARLOCK_PET_SCALING_01, SPELL_WARLOCK_PET_SCALING_02, SPELL_WARLOCK_PET_SCALING_03,
+            SPELL_WARLOCK_PET_SCALING_04, SPELL_WARLOCK_PET_SCALING_05,
+            SPELL_MAGE_PET_SCALING_01, SPELL_MAGE_PET_SCALING_02, SPELL_MAGE_PET_SCALING_03,
+            SPELL_MAGE_PET_SCALING_04,
+            SPELL_DK_PET_SCALING_01, SPELL_DK_PET_SCALING_02, SPELL_DK_PET_SCALING_03,
+            SPELL_HUNTER_PET_SCALING_04 };
+
+        bool any = false;
+        for (uint32 id : scalingIds)
+            if (Aura* aura = guardian->GetAura(id))
+                for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+                    if (AuraEffect* eff = aura->GetEffect(i))
+                    {
+                        eff->RecalculateAmount();
+                        any = true;
+                    }
+
+        if (any)
+            guardian->UpdateAllStats();
+    }
+
     struct ActiveSummon
     {
         ObjectGuid guid;
@@ -242,6 +278,33 @@ namespace
                 _players.erase(it);
         }
 
+        // Owner levelled up: rescale every live guardian to the new level in place. We reuse
+        // the pet level-up path (Guardian::InitStatsForLevel) but (a) preserve the player's
+        // chosen react state, which InitStatsForLevel can reset, and (b) strip the risen-ghoul
+        // emerge stun (47466) it re-applies, so a ding never re-stuns an already-active ghoul.
+        // Note: this rescales stats only; it does not rebuild the action bar, so higher-rank
+        // abilities still require a resummon.
+        void RescaleForLevel(Player* owner)
+        {
+            auto it = _players.find(owner->GetGUID());
+            if (it == _players.end())
+                return;
+
+            uint8 const level = owner->GetLevel();
+            for (ActiveSummon const& summon : it->second.list)
+            {
+                Creature* creature = ObjectAccessor::GetCreature(*owner, summon.guid);
+                if (!creature || !creature->IsAlive() || !creature->IsGuardian())
+                    continue;
+
+                Guardian* guardian = static_cast<Guardian*>(creature);
+                ReactStates const react = guardian->GetReactState();
+                guardian->InitStatsForLevel(level);
+                guardian->SetReactState(react);
+                guardian->RemoveAurasDueToSpell(47466); // SPELL_RISEN_GHOUL_SELF_STUN, no-op on non-ghouls
+            }
+        }
+
         // Session-only: drop the registry (and despawn the summons) when the player leaves.
         void Clear(Player* owner)
         {
@@ -292,6 +355,20 @@ namespace
             if (primary)
                 owner->CharmSpellInitialize();
 
+            // Strip the risen-ghoul emerge stun (47466) that Guardian::InitStatsForLevel applies:
+            // it roots the fresh ghoul and clears its target, which blocks PetAI's initial
+            // MoveFollow, so a summoned ghoul stands idle at its spawn spot until its first fight
+            // clears the state. Removing it lets the ghoul follow/obey immediately, like the other
+            // summons. Runs once per summon and is a no-op for non-ghoul entries.
+            summon->RemoveAurasDueToSpell(47466);
+
+            // PetAI does not reliably establish the follow for a freshly summoned guardian: if
+            // the summon is mid-autocast/forced-spell on its first AI ticks (the ghoul does this),
+            // PetAI skips its return-movement path and the summon sits idle at its spawn spot until
+            // its first fight. This hits primary and secondary summons alike, so start the follow
+            // explicitly for every summon. Movement-only — does not affect the primary's pet bar.
+            summon->GetMotionMaster()->MoveFollow(owner, PET_FOLLOW_DIST, followAngle);
+
             return summon;
         }
 
@@ -323,6 +400,13 @@ namespace
                     return !creature || !creature->IsAlive();
                 }),
                 ps.list.end());
+
+            // Re-inherit owner gear/stats on every live guardian (~1s). Warlock summons would
+            // track on their own; mage/DK ones would freeze at summon-time values without this.
+            for (ActiveSummon const& summon : ps.list)
+                if (Creature* creature = ObjectAccessor::GetCreature(*owner, summon.guid))
+                    if (creature->IsGuardian())
+                        RefreshScalingAuras(creature);
 
             if (ps.list.empty())
                 return;
@@ -366,6 +450,7 @@ public:
         PLAYERHOOK_ON_BEFORE_TEMP_SUMMON_INIT_STATS,
         PLAYERHOOK_ON_PLAYER_IS_CLASS,
         PLAYERHOOK_ON_UPDATE,
+        PLAYERHOOK_ON_LEVEL_CHANGED,
         PLAYERHOOK_ON_LOGOUT
     }) { }
 
@@ -420,6 +505,56 @@ public:
             {
                 petType = guardian->ToPet()->getPetType();
             }
+            return;
+        }
+
+        // Warlock-demon gear scaling. Our demon summons are pure guardians, so they never
+        // travel the real-pet path (LearnPetPassives / InitLevelupSpellsForLevel) that gives a
+        // real imp/felguard the warlock pet scaling passives. Core's Guardian::InitStatsForLevel
+        // only injects scaling auras for a fixed set of guardian entries (Infernal, Doomguard,
+        // Water Elemental, ...) and the five standard demons fall through with none — so owner
+        // gear never reaches them. Add the same passives core gives the Doomguard, here in the
+        // hook core fires from InitStatsForLevel (before its own switch and the closing
+        // UpdateAllStats). spell_warl_generic_scaling then inherits owner stamina/int/spell
+        // power/armor/hit and recalculates every 2s, so the summon tracks gear and level in real
+        // time. Fires again from RescaleForLevel, so a re-init re-asserts the auras. Idempotent:
+        // AddAura of an already-present spell refreshes rather than stacks. Gated on the module's
+        // own summon spell so it never touches an unrelated guardian.
+        if (!IsMulticlassSummonSpell(guardian->GetUInt32Value(UNIT_CREATED_BY_SPELL)))
+            return;
+
+        switch (guardian->GetEntry())
+        {
+            case NPC_IMP:
+            case NPC_VOIDWALKER:
+            case NPC_SUCCUBUS:
+            case NPC_FELHUNTER:
+            case NPC_FELGUARD:
+                guardian->AddAura(SPELL_PET_AVOIDANCE, guardian);
+                guardian->AddAura(SPELL_WARLOCK_PET_SCALING_01, guardian);
+                guardian->AddAura(SPELL_WARLOCK_PET_SCALING_02, guardian);
+                guardian->AddAura(SPELL_WARLOCK_PET_SCALING_03, guardian);
+                guardian->AddAura(SPELL_WARLOCK_PET_SCALING_04, guardian);
+                guardian->AddAura(SPELL_WARLOCK_PET_SCALING_05, guardian);
+                break;
+            // Water Elemental. The PERMANENT entry (37994) is only handled in core's
+            // `case SUMMON_PET:` branch, which a guardian never reaches, so it receives NO mage
+            // scaling auras at all. The TEMP entry (510) does get them from core's default
+            // branch, but adding them here too is idempotent and keeps both paths uniform.
+            // Mirrors the aura set core gives a Water Elemental.
+            case NPC_WATER_ELEMENTAL_TEMP:
+            case NPC_WATER_ELEMENTAL_PERM:
+                guardian->AddAura(SPELL_PET_AVOIDANCE, guardian);
+                guardian->AddAura(SPELL_HUNTER_PET_SCALING_04, guardian); // hit / expertise
+                guardian->AddAura(SPELL_MAGE_PET_SCALING_01, guardian);
+                guardian->AddAura(SPELL_MAGE_PET_SCALING_02, guardian);
+                guardian->AddAura(SPELL_MAGE_PET_SCALING_03, guardian);
+                guardian->AddAura(SPELL_MAGE_PET_SCALING_04, guardian);
+                break;
+            // Ghoul (26125) gets its DK scaling auras from core's own NPC_RISEN_GHOUL /
+            // !IsPet() block, so no AddAura needed here — RefreshScalingAuras drives them live.
+            default:
+                break;
         }
     }
 
@@ -488,6 +623,18 @@ public:
         SummonManager::Instance().Update(player, diff);
     }
 
+    // Rescale any already-active summons to the new level when the owner dings, so a
+    // summon that was out before the level-up doesn't stay frozen at its old level (the
+    // core only auto-syncs real Pets, not our guardians). Level-up only — cheap, and it
+    // avoids re-running the stat init every tick.
+    void OnPlayerLevelChanged(Player* player, uint8 /*oldLevel*/) override
+    {
+        if (IsPlayerBot(player))
+            return;
+
+        SummonManager::Instance().RescaleForLevel(player);
+    }
+
     void OnPlayerLogout(Player* player) override
     {
         SummonManager::Instance().Clear(player);
@@ -503,6 +650,8 @@ class SpellSummonPetOverrideScript : public SpellScript
         Player* owner = GetCaster()->ToPlayer();
         if (!owner)
             return;
+
+        LOG_ERROR("module.multiclass_pet_fix", "SUMMONS MODULE - HandleSummon called for spell {} (caster {})", GetSpellInfo()->Id, owner->GetName());
 
         // Leave playerbots on stock single-pet behaviour (their AI relies on GetPet()).
         if (IsPlayerBot(owner))
@@ -560,7 +709,7 @@ public:
     // attribute; setting it again is a no-op. Runs after spells are loaded.
     void OnStartup() override
     {
-        static constexpr uint32 spells[] = { 688, 697, 712, 691, 30146, 70907, 70908, 46584, 52150 };
+        static constexpr uint32 spells[] = { 688, 697, 712, 691, 30146, 70907, 70908, 46585, 52150 };
         for (uint32 id : spells)
             if (SpellInfo const* info = sSpellMgr->GetSpellInfo(id))
                 const_cast<SpellInfo*>(info)->AttributesEx |= SPELL_ATTR1_DISMISS_PET_FIRST;
@@ -569,11 +718,8 @@ public:
 
 void AddMulticlassPetFixScripts()
 {
+    LOG_ERROR("module.multiclass_pet_fix", "SUMMONS MODULE - AddMulticlassPetFixScripts called!");
     new MulticlassPetFixPlayerScript();
     new SpellSummonPetOverrideLoader();
     new MulticlassSummonWorldScript();
-
-    // NOTE: spell_script_names registration is handled by
-    // data/sql/db-world/base/multiclass_summons.sql, which the DBUpdater auto-applies
-    // during database loading at startup, BEFORE LoadSpellScriptNames().
 }
