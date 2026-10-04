@@ -1,0 +1,31 @@
+diff --git a/src/server/game/Handlers/PetHandler.cpp b/src/server/game/Handlers/PetHandler.cpp
+index 34f307007..d71d49c26 100644
+--- a/src/server/game/Handlers/PetHandler.cpp
++++ b/src/server/game/Handlers/PetHandler.cpp
+@@ -76,7 +76,13 @@ void WorldSession::HandlePetAction(WorldPacket& recvData)
+         return;
+     }
+ 
+-    if (pet != GetPlayer()->GetFirstControlled())
++    // GetFirstControlled() only ever names ONE unit (charm, if any, else the
++    // minion/pet) - too strict on a server where a player can simultaneously
++    // control several summons (mod-multiclass-summons) plus a charm. Any
++    // unit actually in this player's control set is fair game for a command
++    // packet addressed to its own GUID, not just whichever one currently
++    // happens to be "first."
++    if (!GetPlayer()->m_Controlled.count(pet))
+     {
+         LOG_ERROR("network.opcode", "HandlePetAction: Pet ({}) does not belong to player {}", guid1.ToString(), GetPlayer()->GetName());
+         return;
+@@ -134,7 +140,10 @@ void WorldSession::HandlePetStopAttack(WorldPackets::Pet::PetStopAttack& packet)
+         return;
+     }
+ 
+-    if (pet != GetPlayer()->GetPet() && pet != GetPlayer()->GetCharm())
++    // GetPet()/GetCharm() only ever cover the primary pet-slot occupant and
++    // an active charm - miss a secondary summon (mod-multiclass-summons),
++    // which is still legitimately in this player's control set.
++    if (!GetPlayer()->m_Controlled.count(pet))
+     {
+         LOG_ERROR("network.opcode", "HandlePetStopAttack: Pet {} isn't a pet or charmed creature of player {}", packet.PetGUID.ToString(), GetPlayer()->GetName());
+         return;
